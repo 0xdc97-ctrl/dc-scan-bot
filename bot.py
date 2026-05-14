@@ -271,24 +271,46 @@ def extract_cas(text: str) -> list[str]:
     return unique
 
 
-def make_embed_dict(ca: str) -> dict:
+async def get_dexscreener_url(ca: str) -> str | None:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://api.dexscreener.com/latest/dex/tokens/{ca}",
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    pairs = data.get("pairs")
+                    if pairs:
+                        return pairs[0].get("url")
+    except Exception:
+        pass
+    return None
+
+
+def make_embed_dict(ca: str, dex_url: str | None) -> dict:
     color = 0x627EEA if ca.startswith("0x") else 0x9945FF
     chain = "EVM" if ca.startswith("0x") else "Solana"
+    fields = [{"name": "Contract Address", "value": f"`{ca}`", "inline": False}]
+    if dex_url:
+        fields.append({"name": "DexScreener", "value": dex_url, "inline": False})
     return {
         "color": color,
-        "fields": [{"name": "Contract Address", "value": f"`{ca}`", "inline": False}],
+        "fields": fields,
         "footer": {"text": chain}
     }
 
 
 async def broadcast(ca: str) -> None:
     await discord_client.wait_until_ready()
+    dex_url = await get_dexscreener_url(ca)
+    content = dex_url if dex_url else ca
     channels = load_channels()
     dead = []
     async with aiohttp.ClientSession() as session:
         for cid_str, webhook_url in channels.items():
             try:
-                payload = {"content": ca, "embeds": [make_embed_dict(ca)]}
+                payload = {"content": content, "embeds": [make_embed_dict(ca, dex_url)]}
                 await session.post(webhook_url, json=payload)
             except Exception:
                 dead.append(cid_str)
