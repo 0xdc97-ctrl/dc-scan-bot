@@ -4,6 +4,7 @@ import os
 import json
 import discord
 from discord import app_commands
+import aiohttp
 from aiohttp import web
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
@@ -36,10 +37,22 @@ def _save(path: str, key: str, data: set) -> None:
     with open(path, "w") as f:
         json.dump({key: list(data)}, f)
 
-def load_channels()  -> set[int]: return _load(CHANNELS_FILE, "channels")
-def save_channels(s) -> None:     _save(CHANNELS_FILE, "channels", s)
-def add_channel(cid: int)    -> None: s = load_channels(); s.add(cid);     save_channels(s)
-def remove_channel(cid: int) -> None: s = load_channels(); s.discard(cid); save_channels(s)
+# channels.json stores {channel_id_str: webhook_url}
+def load_channels() -> dict:
+    if os.path.exists(CHANNELS_FILE):
+        with open(CHANNELS_FILE) as f:
+            return json.load(f).get("channels", {})
+    return {}
+
+def save_channels(data: dict) -> None:
+    with open(CHANNELS_FILE, "w") as f:
+        json.dump({"channels": data}, f)
+
+def add_channel(cid: int, webhook_url: str) -> None:
+    ch = load_channels(); ch[str(cid)] = webhook_url; save_channels(ch)
+
+def remove_channel(cid: int) -> None:
+    ch = load_channels(); ch.pop(str(cid), None); save_channels(ch)
 
 def load_approved()  -> set[int]: return _load(APPROVED_FILE, "servers")
 def save_approved(s) -> None:     _save(APPROVED_FILE, "servers", s)
@@ -183,8 +196,9 @@ async def cmd_start(interaction: discord.Interaction):
     bot_perms = channel.permissions_for(guild.me)
 
     missing = []
-    if not bot_perms.view_channel:  missing.append("View Channel")
-    if not bot_perms.send_messages: missing.append("Send Messages")
+    if not bot_perms.view_channel:    missing.append("View Channel")
+    if not bot_perms.send_messages:   missing.append("Send Messages")
+    if not bot_perms.manage_webhooks: missing.append("Manage Webhooks")
 
     if missing:
         await interaction.response.send_message(
@@ -196,7 +210,7 @@ async def cmd_start(interaction: discord.Interaction):
         return
 
     # Already approved and active
-    if guild.id in load_approved() and channel.id in load_channels():
+    if guild.id in load_approved() and str(channel.id) in load_channels():
         await interaction.response.send_message(
             "✅ This channel is already receiving CA feeds.", ephemeral=True
         )
@@ -204,7 +218,8 @@ async def cmd_start(interaction: discord.Interaction):
 
     # Approved server, just register the channel
     if guild.id in load_approved():
-        add_channel(channel.id)
+        webhook = await channel.create_webhook(name="CA Feed")
+        add_channel(channel.id, webhook.url)
         await interaction.response.send_message(
             "✅ **CA feed activated!** Contract addresses will be posted here automatically.\n"
             "Run `/stop` to disable at any time."
@@ -234,7 +249,7 @@ async def cmd_start(interaction: discord.Interaction):
 
 @tree.command(name="stop", description="Deactivate CA feed in this channel")
 async def cmd_stop(interaction: discord.Interaction):
-    if interaction.channel.id not in load_channels():
+    if str(interaction.channel.id) not in load_channels():
         await interaction.response.send_message(
             "This channel isn't receiving CA feeds.", ephemeral=True
         )
@@ -255,28 +270,32 @@ def extract_cas(text: str) -> list[str]:
     return unique
 
 
-def make_embed(ca: str) -> discord.Embed:
-    if ca.startswith("0x"):
-        chain, color = "EVM", 0x627EEA
-    else:
-        chain, color = "Solana", 0x9945FF
-    embed = discord.Embed(color=color)
-    embed.add_field(name="Contract Address", value=f"`{ca}`", inline=False)
-    embed.set_footer(text=chain)
-    return embed
+def make_embed_dict(ca: str) -> dict:
+    color = 0x627EEA if ca.startswith("0x") else 0x9945FF
+    chain = "EVM" if ca.startswith("0x") else "Solana"
+    return {
+        "color": color,
+        "fields": [{"name": "Contract Address", "value": f"`{ca}`", "inline": False}],
+        "footer": {"text": chain}
+    }
 
 
 async def broadcast(ca: str) -> None:
     await discord_client.wait_until_ready()
-    dead: set[int] = set()
-    for cid in load_channels():
-        try:
-            ch = discord_client.get_channel(cid) or await discord_client.fetch_channel(cid)
-            await ch.send(content=ca, embed=make_embed(ca))
-        except Exception:
-            dead.add(cid)
+    channels = load_channels()
+    dead = []
+    async with aiohttp.ClientSession() as session:
+        for cid_str, webhook_url in channels.items():
+            try:
+                payload = {"content": ca, "embeds": [make_embed_dict(ca)]}
+                await session.post(webhook_url, json=payload)
+            except Exception:
+                dead.append(cid_str)
     if dead:
-        save_channels(load_channels() - dead)
+        ch = load_channels()
+        for cid_str in dead:
+            ch.pop(cid_str, None)
+        save_channels(ch)
 
 
 # ── Telegram handler ──────────────────────────────────────────────────────────
