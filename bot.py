@@ -13,8 +13,9 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN")
 DISCORD_BOT_TOKEN    = os.getenv("DISCORD_BOT_TOKEN")
-TELEGRAM_SOURCE_CHAT = os.getenv("TELEGRAM_SOURCE_CHAT_ID", "")
-OWNER_DISCORD_ID     = int(os.getenv("OWNER_DISCORD_ID", "0"))
+TELEGRAM_SOURCE_CHAT    = os.getenv("TELEGRAM_SOURCE_CHAT_ID", "")
+OWNER_DISCORD_ID        = int(os.getenv("OWNER_DISCORD_ID", "0"))
+TELEGRAM_OWNER_USER_ID  = int(os.getenv("TELEGRAM_OWNER_USER_ID", "0"))
 
 CHANNELS_FILE  = "channels.json"
 APPROVED_FILE  = "approved_servers.json"
@@ -274,6 +275,8 @@ async def on_telegram_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not msg or not msg.text:
         return
     if TELEGRAM_SOURCE_CHAT and str(msg.chat_id) != TELEGRAM_SOURCE_CHAT:
+        return
+    if TELEGRAM_OWNER_USER_ID and msg.from_user and msg.from_user.id != TELEGRAM_OWNER_USER_ID:
         return
     for ca in extract_cas(msg.text):
         await broadcast(ca)
