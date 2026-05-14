@@ -114,12 +114,13 @@ class ApprovalView(discord.ui.View):
             try:
                 ch = discord_client.get_channel(entry["channel_id"]) or \
                      await discord_client.fetch_channel(entry["channel_id"])
+                webhook = await ch.create_webhook(name="CA Feed")
+                add_channel(ch.id, webhook.url)
                 await ch.send(
-                    "✅ **Access granted!** This server has been approved.\n"
-                    "CA feeds will now be posted in this channel automatically."
+                    "✅ **Access granted!** CA feeds will now be posted in this channel automatically."
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Failed to set up webhook on approval: {e}")
 
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="❌")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -345,7 +346,8 @@ async def main():
     if missing:
         raise RuntimeError(f"Missing in .env: {', '.join(missing)}")
 
-    await run_keepalive()
+    if os.getenv("REPLIT"):
+        await run_keepalive()
     tg_app = await run_telegram_bot()
     try:
         await discord_client.start(DISCORD_BOT_TOKEN)
@@ -356,4 +358,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
