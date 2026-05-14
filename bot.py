@@ -305,13 +305,12 @@ async def broadcast(ca: str) -> None:
     await discord_client.wait_until_ready()
     channels = load_channels()
     dead = []
-    async with aiohttp.ClientSession() as session:
-        for cid_str, webhook_url in channels.items():
-            try:
-                payload = {"content": f".x {ca}"}
-                await session.post(webhook_url, json=payload)
-            except Exception:
-                dead.append(cid_str)
+    for cid_str in channels:
+        try:
+            ch = discord_client.get_channel(int(cid_str)) or await discord_client.fetch_channel(int(cid_str))
+            await ch.send(f".x {ca}")
+        except Exception:
+            dead.append(cid_str)
     if dead:
         ch = load_channels()
         for cid_str in dead:
