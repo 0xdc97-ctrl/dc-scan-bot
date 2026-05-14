@@ -272,7 +272,7 @@ async def broadcast(ca: str) -> None:
     for cid in load_channels():
         try:
             ch = discord_client.get_channel(cid) or await discord_client.fetch_channel(cid)
-            await ch.send(embed=make_embed(ca))
+            await ch.send(content=ca, embed=make_embed(ca))
         except Exception:
             dead.add(cid)
     if dead:
