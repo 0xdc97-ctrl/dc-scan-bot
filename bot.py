@@ -271,44 +271,38 @@ def extract_cas(text: str) -> list[str]:
     return unique
 
 
-async def get_dexscreener_url(ca: str) -> str | None:
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"https://api.dexscreener.com/latest/dex/tokens/{ca}",
-                timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    pairs = data.get("pairs")
-                    if pairs:
-                        return pairs[0].get("url")
-    except Exception:
-        pass
-    return None
+# ca → asyncio.Task (fallback timer waiting for Rick)
+pending_cas: dict[str, asyncio.Task] = {}
 
 
-def make_embed_dict(ca: str, dex_url: str | None) -> dict:
+def make_rick_embed(ca: str, rick_text: str) -> discord.Embed:
+    lines = rick_text.strip().split("\n")
+    title = lines[0] if lines else ca
+    body  = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
+    color = 0x627EEA if ca.startswith("0x") else 0x9945FF
+    embed = discord.Embed(title=title, description=body or None, color=color)
+    embed.set_footer(text=ca)
+    return embed
+
+
+def make_ca_embed(ca: str) -> discord.Embed:
     color = 0x627EEA if ca.startswith("0x") else 0x9945FF
     chain = "EVM" if ca.startswith("0x") else "Solana"
-    fields = [{"name": "Contract Address", "value": f"`{ca}`", "inline": False}]
-    if dex_url:
-        fields.append({"name": "DexScreener", "value": dex_url, "inline": False})
-    return {
-        "color": color,
-        "fields": fields,
-        "footer": {"text": chain}
-    }
+    embed = discord.Embed(color=color)
+    embed.add_field(name="Contract Address", value=f"`{ca}`", inline=False)
+    embed.set_footer(text=chain)
+    return embed
 
 
-async def broadcast(ca: str) -> None:
+async def post_to_channels(embed: discord.Embed) -> None:
     await discord_client.wait_until_ready()
     channels = load_channels()
     dead = []
     for cid_str in channels:
         try:
-            ch = discord_client.get_channel(int(cid_str)) or await discord_client.fetch_channel(int(cid_str))
-            await ch.send(f".x {ca}")
+            ch = discord_client.get_channel(int(cid_str)) or \
+                 await discord_client.fetch_channel(int(cid_str))
+            await ch.send(embed=embed)
         except Exception:
             dead.append(cid_str)
     if dead:
@@ -316,6 +310,13 @@ async def broadcast(ca: str) -> None:
         for cid_str in dead:
             ch.pop(cid_str, None)
         save_channels(ch)
+
+
+async def fallback_broadcast(ca: str) -> None:
+    await asyncio.sleep(10)
+    if ca in pending_cas:
+        pending_cas.pop(ca, None)
+        await post_to_channels(make_ca_embed(ca))
 
 
 # ── Telegram handler ──────────────────────────────────────────────────────────
@@ -326,10 +327,25 @@ async def on_telegram_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if TELEGRAM_SOURCE_CHAT and str(msg.chat_id) != TELEGRAM_SOURCE_CHAT:
         return
-    if TELEGRAM_OWNER_USER_ID and msg.from_user and msg.from_user.id != TELEGRAM_OWNER_USER_ID:
+
+    user = msg.from_user
+
+    if user and user.is_bot:
+        # Rick (or any scanner bot) responded — check if it contains a pending CA
+        for ca in extract_cas(msg.text):
+            if ca in pending_cas:
+                pending_cas[ca].cancel()
+                pending_cas.pop(ca, None)
+                await post_to_channels(make_rick_embed(ca, msg.text))
         return
+
+    # Human message — only process owner's messages
+    if TELEGRAM_OWNER_USER_ID and user and user.id != TELEGRAM_OWNER_USER_ID:
+        return
+
     for ca in extract_cas(msg.text):
-        await broadcast(ca)
+        if ca not in pending_cas:
+            pending_cas[ca] = asyncio.create_task(fallback_broadcast(ca))
 
 
 # ── Keep-alive server ─────────────────────────────────────────────────────────
