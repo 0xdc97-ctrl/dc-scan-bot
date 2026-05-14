@@ -303,14 +303,12 @@ def make_embed_dict(ca: str, dex_url: str | None) -> dict:
 
 async def broadcast(ca: str) -> None:
     await discord_client.wait_until_ready()
-    dex_url = await get_dexscreener_url(ca)
-    content = dex_url if dex_url else ca
     channels = load_channels()
     dead = []
     async with aiohttp.ClientSession() as session:
         for cid_str, webhook_url in channels.items():
             try:
-                payload = {"content": content, "embeds": [make_embed_dict(ca, dex_url)]}
+                payload = {"content": f".x {ca}"}
                 await session.post(webhook_url, json=payload)
             except Exception:
                 dead.append(cid_str)
