@@ -14,6 +14,7 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN")
 DISCORD_BOT_TOKEN    = os.getenv("DISCORD_BOT_TOKEN")
+DISCORD_USER_TOKEN   = os.getenv("DISCORD_USER_TOKEN", "")
 TELEGRAM_SOURCE_CHAT    = os.getenv("TELEGRAM_SOURCE_CHAT_ID", "")
 OWNER_DISCORD_ID        = int(os.getenv("OWNER_DISCORD_ID", "0"))
 TELEGRAM_OWNER_USER_ID  = int(os.getenv("TELEGRAM_OWNER_USER_ID", "0"))
@@ -273,16 +274,26 @@ def extract_cas(text: str) -> list[str]:
 
 
 async def broadcast(ca: str) -> None:
-    await discord_client.wait_until_ready()
     channels = load_channels()
     dead = []
-    for cid_str in channels:
-        try:
-            ch = discord_client.get_channel(int(cid_str)) or \
-                 await discord_client.fetch_channel(int(cid_str))
-            await ch.send(f".s {ca}")
-        except Exception:
-            dead.append(cid_str)
+    headers = {
+        "Authorization": DISCORD_USER_TOKEN,
+        "Content-Type": "application/json",
+    }
+    async with aiohttp.ClientSession(headers=headers) as session:
+        for cid_str in channels:
+            url = f"https://discord.com/api/v10/channels/{cid_str}/messages"
+            payload = {"content": f"**New Token Scanned**\nCA: {ca}"}
+            try:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status not in (200, 201):
+                        body = await resp.text()
+                        print(f"Failed to post to {cid_str}: {resp.status} {body}")
+                        if resp.status in (401, 403, 404):
+                            dead.append(cid_str)
+            except Exception as e:
+                print(f"Error posting to {cid_str}: {e}")
+                dead.append(cid_str)
     if dead:
         ch = load_channels()
         for cid_str in dead:
