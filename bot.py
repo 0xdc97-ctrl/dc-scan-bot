@@ -280,7 +280,7 @@ async def broadcast(ca: str) -> None:
         try:
             ch = discord_client.get_channel(int(cid_str)) or \
                  await discord_client.fetch_channel(int(cid_str))
-            await ch.send(ca)
+            await ch.send(f".s {ca}")
         except Exception:
             dead.append(cid_str)
     if dead:
