@@ -11,35 +11,62 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN     = os.getenv("TELEGRAM_BOT_TOKEN")
-DISCORD_BOT_TOKEN      = os.getenv("DISCORD_BOT_TOKEN")
-# Your private TG group that feeds CAs — leave blank to accept from any group
-TELEGRAM_SOURCE_CHAT   = os.getenv("TELEGRAM_SOURCE_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN")
+DISCORD_BOT_TOKEN    = os.getenv("DISCORD_BOT_TOKEN")
+TELEGRAM_SOURCE_CHAT = os.getenv("TELEGRAM_SOURCE_CHAT_ID", "")
+OWNER_DISCORD_ID     = int(os.getenv("OWNER_DISCORD_ID", "0"))
 
-CHANNELS_FILE = "channels.json"
+CHANNELS_FILE  = "channels.json"
+APPROVED_FILE  = "approved_servers.json"
+PENDING_FILE   = "pending_requests.json"
 
 EVM_RE    = re.compile(r'\b(0x[0-9a-fA-F]{40})\b')
 SOLANA_RE = re.compile(r'\b([1-9A-HJ-NP-Za-km-z]{43,44})\b')
 
-# ── Channel registry (persisted to disk) ─────────────────────────────────────
+# ── Persistence helpers ───────────────────────────────────────────────────────
 
-def load_channels() -> set[int]:
-    if os.path.exists(CHANNELS_FILE):
-        with open(CHANNELS_FILE) as f:
-            return set(json.load(f).get("channels", []))
+def _load(path: str, key: str, cast=list) -> set:
+    if os.path.exists(path):
+        with open(path) as f:
+            return set(json.load(f).get(key, cast()))
     return set()
 
-def save_channels(channels: set[int]) -> None:
-    with open(CHANNELS_FILE, "w") as f:
-        json.dump({"channels": list(channels)}, f)
+def _save(path: str, key: str, data: set) -> None:
+    with open(path, "w") as f:
+        json.dump({key: list(data)}, f)
 
-def add_channel(cid: int) -> None:
-    ch = load_channels(); ch.add(cid); save_channels(ch)
+def load_channels()  -> set[int]: return _load(CHANNELS_FILE, "channels")
+def save_channels(s) -> None:     _save(CHANNELS_FILE, "channels", s)
+def add_channel(cid: int)    -> None: s = load_channels(); s.add(cid);     save_channels(s)
+def remove_channel(cid: int) -> None: s = load_channels(); s.discard(cid); save_channels(s)
 
-def remove_channel(cid: int) -> None:
-    ch = load_channels(); ch.discard(cid); save_channels(ch)
+def load_approved()  -> set[int]: return _load(APPROVED_FILE, "servers")
+def save_approved(s) -> None:     _save(APPROVED_FILE, "servers", s)
+def approve_server(gid: int) -> None: s = load_approved(); s.add(gid);     save_approved(s)
+def revoke_server(gid: int)  -> None: s = load_approved(); s.discard(gid); save_approved(s)
 
-# ── Discord setup ─────────────────────────────────────────────────────────────
+def load_pending() -> dict:
+    if os.path.exists(PENDING_FILE):
+        with open(PENDING_FILE) as f:
+            return json.load(f).get("requests", {})
+    return {}
+
+def save_pending(data: dict) -> None:
+    with open(PENDING_FILE, "w") as f:
+        json.dump({"requests": data}, f)
+
+def add_pending(guild_id: int, channel_id: int, guild_name: str, requester: str) -> None:
+    p = load_pending()
+    p[str(guild_id)] = {"channel_id": channel_id, "guild_name": guild_name, "requester": requester}
+    save_pending(p)
+
+def pop_pending(guild_id: int) -> dict | None:
+    p = load_pending()
+    entry = p.pop(str(guild_id), None)
+    save_pending(p)
+    return entry
+
+# ── Discord client ────────────────────────────────────────────────────────────
 
 intents        = discord.Intents.default()
 discord_client = discord.Client(intents=intents)
@@ -48,15 +75,83 @@ tree           = app_commands.CommandTree(discord_client)
 
 @discord_client.event
 async def on_ready():
-    await tree.sync()   # global sync — commands appear in all servers within ~1 hr
+    await tree.sync()
     print(f"Discord ready: {discord_client.user}  |  slash commands synced")
 
+
+# ── Approval buttons ──────────────────────────────────────────────────────────
+
+class ApprovalView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅")
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        entry = pop_pending(self.guild_id)
+        approve_server(self.guild_id)
+
+        await interaction.response.edit_message(
+            content=f"✅ **Approved** — `{entry['guild_name'] if entry else self.guild_id}`",
+            embed=None, view=None
+        )
+
+        if entry:
+            try:
+                ch = discord_client.get_channel(entry["channel_id"]) or \
+                     await discord_client.fetch_channel(entry["channel_id"])
+                await ch.send(
+                    "✅ **Access granted!** This server has been approved.\n"
+                    "CA feeds will now be posted in this channel automatically."
+                )
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="❌")
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        entry = pop_pending(self.guild_id)
+
+        await interaction.response.edit_message(
+            content=f"❌ **Denied** — `{entry['guild_name'] if entry else self.guild_id}`",
+            embed=None, view=None
+        )
+
+        if entry:
+            try:
+                ch = discord_client.get_channel(entry["channel_id"]) or \
+                     await discord_client.fetch_channel(entry["channel_id"])
+                await ch.send(
+                    "❌ **Access denied.** This server was not approved for the CA feed.\n"
+                    "Contact the bot owner if you think this is a mistake."
+                )
+            except Exception:
+                pass
+
+
+async def notify_owner(guild_id: int, guild_name: str, channel_name: str, requester: str) -> None:
+    await discord_client.wait_until_ready()
+    try:
+        owner = await discord_client.fetch_user(OWNER_DISCORD_ID)
+        embed = discord.Embed(
+            title="New Access Request",
+            color=0xF0A500
+        )
+        embed.add_field(name="Server",    value=guild_name,   inline=True)
+        embed.add_field(name="Channel",   value=f"#{channel_name}", inline=True)
+        embed.add_field(name="Requested by", value=requester, inline=True)
+        embed.add_field(name="Server ID", value=str(guild_id), inline=False)
+        await owner.send(embed=embed, view=ApprovalView(guild_id))
+    except Exception as e:
+        print(f"Failed to DM owner: {e}")
+
+
+# ── Slash commands ────────────────────────────────────────────────────────────
 
 @tree.command(name="setup", description="Show setup guide for the CA feed bot")
 async def cmd_setup(interaction: discord.Interaction):
     embed = discord.Embed(
         title="CA Feed — Setup Guide",
-        description="Follow these 3 steps to start receiving contract addresses automatically.",
+        description="Follow these steps to request access to the CA feed.",
         color=0x5865F2
     )
     embed.add_field(
@@ -67,49 +162,72 @@ async def cmd_setup(interaction: discord.Interaction):
     embed.add_field(
         name="2️⃣  Grant the bot permissions in that channel",
         value="Channel Settings → Permissions → add this bot with:\n"
-              "✅ **View Channel**\n"
-              "✅ **Send Messages**",
+              "✅ **View Channel**\n✅ **Send Messages**",
         inline=False
     )
     embed.add_field(
         name="3️⃣  Run /start in that channel",
-        value="The bot will verify permissions and register the channel.\n"
-              "CAs will be forwarded there automatically from that point on.",
+        value="This sends an access request to the bot owner.\n"
+              "Once approved, CAs will be forwarded here automatically.",
         inline=False
     )
-    embed.set_footer(text="Run /stop at any time to disable forwarding in a channel.")
+    embed.set_footer(text="Run /stop at any time to disable forwarding.")
     await interaction.response.send_message(embed=embed)
 
 
-@tree.command(name="start", description="Activate CA feed in this channel")
+@tree.command(name="start", description="Request CA feed access for this channel")
 async def cmd_start(interaction: discord.Interaction):
     channel   = interaction.channel
-    bot_perms = channel.permissions_for(interaction.guild.me)
+    guild     = interaction.guild
+    bot_perms = channel.permissions_for(guild.me)
 
     missing = []
-    if not bot_perms.view_channel:   missing.append("View Channel")
-    if not bot_perms.send_messages:  missing.append("Send Messages")
+    if not bot_perms.view_channel:  missing.append("View Channel")
+    if not bot_perms.send_messages: missing.append("Send Messages")
 
     if missing:
         await interaction.response.send_message(
             f"❌ Missing permissions: **{', '.join(missing)}**\n"
             "Grant them in channel settings, then run `/start` again.\n"
-            "Need help? Run `/setup` for a step-by-step guide.",
+            "Need help? Run `/setup`.",
             ephemeral=True
         )
         return
 
-    if channel.id in load_channels():
+    # Already approved and active
+    if guild.id in load_approved() and channel.id in load_channels():
         await interaction.response.send_message(
             "✅ This channel is already receiving CA feeds.", ephemeral=True
         )
         return
 
-    add_channel(channel.id)
+    # Approved server, just register the channel
+    if guild.id in load_approved():
+        add_channel(channel.id)
+        await interaction.response.send_message(
+            "✅ **CA feed activated!** Contract addresses will be posted here automatically.\n"
+            "Run `/stop` to disable at any time."
+        )
+        return
+
+    # Not approved — send request to owner
+    pending = load_pending()
+    if str(guild.id) in pending:
+        await interaction.response.send_message(
+            "⏳ An access request for this server is already pending.\n"
+            "Please wait for the owner to approve it.",
+            ephemeral=True
+        )
+        return
+
+    requester = f"{interaction.user.name} ({interaction.user.id})"
+    add_pending(guild.id, channel.id, guild.name, requester)
+    await notify_owner(guild.id, guild.name, channel.name, requester)
+
     await interaction.response.send_message(
-        "✅ **CA feed activated!**\n"
-        "Contract addresses will be posted here automatically.\n"
-        "Run `/stop` to disable at any time."
+        "📨 **Access request sent!**\n"
+        "The bot owner has been notified. You'll receive a confirmation here once approved.",
+        ephemeral=False
     )
 
 
@@ -138,16 +256,13 @@ def extract_cas(text: str) -> list[str]:
 
 async def broadcast(ca: str) -> None:
     await discord_client.wait_until_ready()
-    channels = load_channels()
     dead: set[int] = set()
-
-    for cid in channels:
+    for cid in load_channels():
         try:
             ch = discord_client.get_channel(cid) or await discord_client.fetch_channel(cid)
             await ch.send(ca)
         except Exception:
-            dead.add(cid)   # bot removed or channel deleted — clean it up
-
+            dead.add(cid)
     if dead:
         save_channels(load_channels() - dead)
 
@@ -164,7 +279,7 @@ async def on_telegram_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await broadcast(ca)
 
 
-# ── Keep-alive server (for UptimeRobot ping) ─────────────────────────────────
+# ── Keep-alive server ─────────────────────────────────────────────────────────
 
 async def run_keepalive():
     async def health(request):
@@ -174,7 +289,7 @@ async def run_keepalive():
     runner = web.AppRunner(server)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", 8080).start()
-    print("Keep-alive server running on port 8080")
+    print("Keep-alive server on port 8080")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -190,12 +305,12 @@ async def run_telegram_bot():
 
 
 async def main():
-    missing_cfg = [k for k, v in {
+    missing = [k for k, v in {
         "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
         "DISCORD_BOT_TOKEN":  DISCORD_BOT_TOKEN,
     }.items() if not v]
-    if missing_cfg:
-        raise RuntimeError(f"Missing in .env: {', '.join(missing_cfg)}")
+    if missing:
+        raise RuntimeError(f"Missing in .env: {', '.join(missing)}")
 
     await run_keepalive()
     tg_app = await run_telegram_bot()
