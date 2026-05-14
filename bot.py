@@ -255,13 +255,24 @@ def extract_cas(text: str) -> list[str]:
     return unique
 
 
+def make_embed(ca: str) -> discord.Embed:
+    if ca.startswith("0x"):
+        chain, color = "EVM", 0x627EEA
+    else:
+        chain, color = "Solana", 0x9945FF
+    embed = discord.Embed(color=color)
+    embed.add_field(name="Contract Address", value=f"`{ca}`", inline=False)
+    embed.set_footer(text=chain)
+    return embed
+
+
 async def broadcast(ca: str) -> None:
     await discord_client.wait_until_ready()
     dead: set[int] = set()
     for cid in load_channels():
         try:
             ch = discord_client.get_channel(cid) or await discord_client.fetch_channel(cid)
-            await ch.send(ca)
+            await ch.send(embed=make_embed(ca))
         except Exception:
             dead.add(cid)
     if dead:
